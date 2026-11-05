@@ -14,9 +14,10 @@
 #      - 安装 whzhni1/luci-app-tailscale（Tailscale 的 LuCI 界面 + 中文包）
 #      - 安装 vernesong/OpenClash 最新版 apk 包
 #      - 清理 feed 的 kmod-* 包与 6.x 模块目录（设备使用 mu300 自带 5.4 内核模块）
-#      - 写入 /etc/banner + /etc/buildinfo + /etc/openwrt_release + /usr/lib/os-release 署名
-#        （LuCI 概览页「固件版本」读的是 /usr/lib/os-release 的 OPENWRT_RELEASE——
-#          由 procd 提供 ubus system board，不是 /etc/openwrt_release 的 DISTRIB_DESCRIPTION）
+#      - 写入署名：/etc/banner（SSH/串口登录横幅）+ /etc/buildinfo（cat 可查）
+#        ※ 不再改写 /etc/openwrt_release 与 /usr/lib/os-release。
+#          os-release 由 procd 解析后直接喂给 ubus system board，引号/转义处理不当会让
+#          LuCI 概览页那行显示成乱码，风险远大于收益，按需求整块去掉。
 #   3. docker export -> 修复 Docker 注入的 resolv.conf/hosts/hostname -> gzip
 #
 # 插件只有两个：OpenClash + Tailscale（都带 LuCI 界面）。AdGuard Home 已按需求去掉。
@@ -60,39 +61,44 @@ docker run --platform linux/arm64 --name "${IMG}-build" \
   -e BUILD_DATE="$BUILD_DATE" \
   -e BASE_TAG="$TAG" \
   -e GH_PROXY="${GH_PROXY:-}" \
+  -e OPENWRT_MIRROR="${OPENWRT_MIRROR:-}" \
   -e SYSTEM_LABEL="$SYSTEM" \
   "${IMG}:base" /bin/sh -euc '
     if [ -n "${OPENWRT_MIRROR:-}" ]; then
       sed -i "s_https\?://downloads.openwrt.org_${OPENWRT_MIRROR}_" /etc/apk/repositories.d/distfeeds.list 2>/dev/null || true
     fi
+    # 只刷新索引，不做 apk upgrade：整库升级会动 glibc/内核相关包，
+    # 与设备固化的 5.4 内核模块存在版本错配风险，收益为零。
     apk update
-    apk upgrade
 
     # --- OpenClash 依赖: dnsmasq 换 dnsmasq-full ---
-    apk del dnsmasq
+    apk del dnsmasq || true
     apk add dnsmasq-full bash coreutils-nohup curl ca-certificates \
         ipset ip-full libcap ruby ruby-yaml unzip luci-compat luci-base
+    # OpenClash 的界面是旧式 Lua 控制器；新版 LuCI 把 Lua 运行时拆成了独立包，
+    # 装上才能渲染。老版本已内置，所以这里失败不算错误。
+    apk add luci-lua-runtime || echo "提示: 没有独立的 luci-lua-runtime 包（新款已内置 Lua 运行时）"
 
     # --- Tailscale LuCI 界面（whzhni1/luci-app-tailscale，自带 config/init + 中文包）---
     # 不装官方 tailscale 包：它也带 etc/config/tailscale 与 etc/init.d/tailscale，
     # 与本 bundle 互相覆盖会让 apk 报错退出（实测 1 error）。
-    LTS_VER=$(curl -fsSL "${GH_PROXY}https://api.github.com/repos/whzhni1/luci-app-tailscale/releases/latest" \
-          | sed -n "s/.*\"tag_name\": *\"v\([^\"]*\)\".*/\1/p" | head -n1)
+    LTS_VER=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 "${GH_PROXY}https://api.github.com/repos/whzhni1/luci-app-tailscale/releases/latest" \
+          | sed -n "s/.*\"tag_name\" *: *\"v\{0,1\}\([^\"]*\)\".*/\1/p" | head -n1)
     [ -n "$LTS_VER" ] || { echo "无法获取 luci-app-tailscale 版本号"; exit 1; }
     echo "luci-app-tailscale 版本: v${LTS_VER}"
-    curl -fsSL -o /tmp/lts.apk \
+    curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 -o /tmp/lts.apk \
       "${GH_PROXY}https://github.com/whzhni1/luci-app-tailscale/releases/download/v${LTS_VER}/luci-app-tailscale-${LTS_VER}-r1.apk"
-    curl -fsSL -o /tmp/lts-zh.apk \
+    curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 -o /tmp/lts-zh.apk \
       "${GH_PROXY}https://github.com/whzhni1/luci-app-tailscale/releases/download/v${LTS_VER}/luci-i18n-tailscale-zh-cn-${LTS_VER}.apk"
     apk add --allow-untrusted /tmp/lts.apk /tmp/lts-zh.apk
     rm -f /tmp/lts.apk /tmp/lts-zh.apk
 
     # --- OpenClash (vernesong 官方 apk) ---
-    VER=$(curl -fsSL "${GH_PROXY}https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
-          | sed -n "s/.*\"tag_name\": *\"v\([^\"]*\)\".*/\1/p" | head -n1)
+    VER=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 "${GH_PROXY}https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
+          | sed -n "s/.*\"tag_name\" *: *\"v\{0,1\}\([^\"]*\)\".*/\1/p" | head -n1)
     [ -n "$VER" ] || { echo "无法获取 OpenClash 最新版本号"; exit 1; }
     echo "OpenClash 版本: v${VER}"
-    curl -fsSL -o /tmp/openclash.apk \
+    curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 -o /tmp/openclash.apk \
       "${GH_PROXY}https://github.com/vernesong/OpenClash/releases/download/v${VER}/luci-app-openclash-${VER}.apk"
     apk add --allow-untrusted /tmp/openclash.apk
     rm -f /tmp/openclash.apk
@@ -117,7 +123,14 @@ docker run --platform linux/arm64 --name "${IMG}-build" \
       echo "清理 feed 模块目录: /lib/modules/$FEEDREL"
       rm -rf "/lib/modules/$FEEDREL"
     fi
-    for d in /lib/modules/*-1-*; do [ -d "$d" ] && rm -rf "$d"; done
+    # 同一逻辑的兜底：任何 <ver>-1-<hash> 形式的目录也清掉。
+    # 注意 glob 没匹配到东西时 $d 是字面量，[ -d ] 为假会让整条 for 返回非零，
+    # 在 set -e 下直接中断构建，所以必须写成 if 而不是 && 链。
+    set +e
+    for d in /lib/modules/*-1-*; do
+      if [ -d "$d" ]; then rm -rf "$d"; fi
+    done
+    set -e
     echo "保留的内核模块目录: $(ls /lib/modules 2>/dev/null | tr "\n" " ")"
 
     # --- 清点两个插件的文件（只报告，不让构建失败；缺了看日志里的 MISS）---
@@ -164,47 +177,15 @@ kernel=5.4
 plugins=openclash,tailscale-luci
 system=${SYSTEM_LABEL}
 EOB
-    # LuCI 概览页「固件版本」一行读 /etc/openwrt_release 的 DISTRIB_DESCRIPTION
-    # （rpcd 的 system board 接口），在原描述后追加署名，让网页端也能看到编译信息。
-    # 注意：不要把这一步写成 sed s|...|...|，署名文本里含 "|" 会被当成分隔符，
-    # 实测报 "sed: bad option in substitution expression" 并中断构建。
-    # 这里改为逐行重写，完全避开 sed 的转义/分隔符问题。
-    cp -a /etc/openwrt_release /etc/openwrt_release.orig 2>/dev/null || true
-    # shellcheck disable=SC1091
-    . /etc/openwrt_release 2>/dev/null || true
-    NEWDESC="${DISTRIB_DESCRIPTION:-OpenWrt} | custom by ${BUILDER} (base ${BASE_TAG})"
-    DESC_LINE="DISTRIB_DESCRIPTION=\"${NEWDESC}\""
-    : > /etc/openwrt_release.new
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        DISTRIB_DESCRIPTION=*) printf "%s\n" "$DESC_LINE" >> /etc/openwrt_release.new ;;
-        *)                     printf "%s\n" "$line"      >> /etc/openwrt_release.new ;;
-      esac
-    done < /etc/openwrt_release
-    mv /etc/openwrt_release.new /etc/openwrt_release
-    # 但 LuCI 概览页的「固件版本」其实不读上面这个文件：ubus 的 system board 由 procd 提供，
-    # procd 读的是 /usr/lib/os-release 的 OPENWRT_RELEASE（在 /sbin/procd 里能 grep 到这两个串）。
-    # /etc/os-release 是指向 ../usr/lib/os-release 的符号链接，所以只改 lib 下这一份。
-    OSR=/usr/lib/os-release
-    if [ -f "$OSR" ]; then
-      # shellcheck disable=SC1090
-      . "$OSR" 2>/dev/null || true
-      NEWOS="${OPENWRT_RELEASE:-OpenWrt} | custom by ${BUILDER} (base ${BASE_TAG})"
-      cp -a "$OSR" "$OSR.orig" 2>/dev/null || true
-      : > /tmp/os-release.new
-      while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in
-          OPENWRT_RELEASE=*) printf 'OPENWRT_RELEASE="%s"\n' "$NEWOS" >> /tmp/os-release.new ;;
-          *)                 printf "%s\n" "$line" >> /tmp/os-release.new ;;
-        esac
-      done < "$OSR"
-      mv /tmp/os-release.new "$OSR"
-      echo "os-release 版本行: $NEWOS"
-    else
-      echo "提示: 没有 $OSR，LuCI 概览页可能仍显示官方版本号"
-    fi
-    echo "署名完成: /etc/banner + /etc/buildinfo + /etc/openwrt_release + /usr/lib/os-release"
-    echo "固件版本: ${NEWDESC}"
+    # 署名只写 /etc/banner 与 /etc/buildinfo 这两个「自己的文件」。
+    #
+    # 不再改写 /etc/openwrt_release 和 /usr/lib/os-release：
+    #   LuCI 概览页那行版本串由 procd 解析 /usr/lib/os-release 的 OPENWRT_RELEASE 得到，
+    #   procd 是按空白切分 "key=value" 的，值里带空格/竖线/括号时极易解析错位，
+    #   实测会出现整行乱码。收益只是网页上多一行字，风险却是整块系统信息显示异常，
+    #   按需求整块去掉。看署名请用：cat /etc/buildinfo，或 SSH 登录时的 banner。
+    echo "署名完成: /etc/banner + /etc/buildinfo"
+    echo "固件版本(系统自带): $( ( . /etc/openwrt_release 2>/dev/null; echo "${DISTRIB_DESCRIPTION:-未知}" ) )"
   '
 
 echo "==> [3/4] 导出容器"
@@ -217,16 +198,27 @@ echo "==> [4/4] 容器内修复 Docker 残留文件并重打包"
 # 影响的文件 -> 重打包。在 root 容器内执行以保留 uid/gid，且不依赖宿主机 tar。
 docker run --rm \
   -v "$(realpath "$REL_DIR"):/w" \
+  -e ROOTFS="$ROOTFS" \
   alpine:3.20 sh -euc '
-    apk add -q tar >/dev/null 2>&1 || true
     mkdir -p /fix
     tar -xf /w/rootfs-export.tar -C /fix
-    rm -f /fix/etc/resolv.conf /fix/etc/hosts /fix/etc/hostname
-    printf "nameserver 127.0.0.1\nsearch lan\n"          > /fix/etc/resolv.conf
-    printf "127.0.0.1 localhost\n\n::1 localhost ip6-localhost ip6-loopback\n" > /fix/etc/hosts
-    printf "OpenWrt\n"                                   > /fix/etc/hostname
+    # docker export 会带出容器运行时生成的 /etc/hosts、/etc/hostname。
+    # 优先从原始 tarball 里取回原样内容（镜像自带的 hosts 可能被上游 overlay 加过条目，
+    # 无条件覆盖会丢东西），取不到才写 OpenWrt 默认值。
+    for f in etc/hosts etc/hostname; do
+      if { tar -xzOf "/w/${ROOTFS}.orig" "$f" 2>/dev/null || tar -xzOf "/w/${ROOTFS}.orig" "./$f" 2>/dev/null; } > /tmp/orig && [ -s /tmp/orig ]; then
+        cp /tmp/orig "/fix/$f"
+        echo "  还原 $f（取自原始 rootfs）"
+      fi
+      rm -f /tmp/orig
+    done
+    [ -s /fix/etc/hosts ] \
+      || printf "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n" > /fix/etc/hosts
+    [ -s /fix/etc/hostname ] || printf "OpenWrt\n" > /fix/etc/hostname
+    printf "nameserver 127.0.0.1\nsearch lan\n" > /fix/etc/resolv.conf
     tar -C /fix -czf /w/rootfs-fixed.tar.gz .
     rm -f /w/rootfs-export.tar
+    echo "  重打包完成"
   '
 mv "${REL_DIR}/rootfs-fixed.tar.gz" "$SRC"
 
