@@ -12,9 +12,11 @@
 #   2. docker import 为 arm64 容器，在容器内:
 #      - dnsmasq -> dnsmasq-full（OpenClash 前置要求）
 #      - apk add tailscale adguardhome（OpenWrt 25.12 官方 feed）
+#      - 安装 whzhni1/luci-app-tailscale（Tailscale 的 LuCI 界面 + 中文包）
 #      - 安装 vernesong/OpenClash 最新版 apk 包
 #      - 清理所有 kmod-* 包（设备使用 mu300 自带 5.4 内核模块）
-#      - 写入 /etc/banner 与 /etc/buildinfo 编译署名
+#      - 写入 /etc/banner + /etc/buildinfo + /etc/openwrt_release 编译署名
+#        （openwrt_release 的 DISTRIB_DESCRIPTION 会显示在 LuCI 概览页）
 #   3. docker export -> 修复 Docker 注入的 resolv.conf/hosts/hostname -> gzip
 #
 # 环境变量（可选）:
@@ -67,6 +69,18 @@ docker run --platform linux/arm64 --name "${IMG}-build" \
     # --- 官方 feed 插件 ---
     apk add tailscale adguardhome
 
+    # --- Tailscale LuCI 界面（官方源无 luci 界面，用 whzhni1/luci-app-tailscale）---
+    LTS_VER=$(curl -fsSL "${GH_PROXY}https://api.github.com/repos/whzhni1/luci-app-tailscale/releases/latest" \
+          | sed -n "s/.*\"tag_name\": *\"v\([^\"]*\)\".*/\1/p" | head -n1)
+    [ -n "$LTS_VER" ] || { echo "无法获取 luci-app-tailscale 版本号"; exit 1; }
+    echo "luci-app-tailscale 版本: v${LTS_VER}"
+    curl -fsSL -o /tmp/lts.apk \
+      "${GH_PROXY}https://github.com/whzhni1/luci-app-tailscale/releases/download/v${LTS_VER}/luci-app-tailscale-${LTS_VER}-r1.apk"
+    curl -fsSL -o /tmp/lts-zh.apk \
+      "${GH_PROXY}https://github.com/whzhni1/luci-app-tailscale/releases/download/v${LTS_VER}/luci-i18n-tailscale-zh-cn-${LTS_VER}.apk"
+    apk add --allow-untrusted /tmp/lts.apk /tmp/lts-zh.apk
+    rm -f /tmp/lts.apk /tmp/lts-zh.apk
+
     # --- OpenClash (vernesong 官方 apk) ---
     VER=$(curl -fsSL "${GH_PROXY}https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
           | sed -n "s/.*\"tag_name\": *\"v\([^\"]*\)\".*/\1/p" | head -n1)
@@ -96,7 +110,7 @@ docker run --platform linux/arm64 --name "${IMG}-build" \
  mu300-custom : ZTE F50 / MU300 OpenWrt
  Builder : ${BUILDER}
  Base    : ${BASE_TAG}
- Plugins : OpenClash | Tailscale | AdGuard Home
+ Plugins : OpenClash | Tailscale(+LuCI) | AdGuard Home(Web :3000)
  Built   : ${BUILD_DATE}
 ==============================================
 EOB
@@ -104,10 +118,17 @@ EOB
 builder=${BUILDER}
 base_tag=${BASE_TAG}
 built_at=${BUILD_DATE}
-plugins=openclash,tailscale,adguardhome
+plugins=openclash,tailscale,tailscale-luci,adguardhome
 system=${SYSTEM_LABEL}
 EOB
-    echo "署名完成: /etc/banner + /etc/buildinfo"
+    # LuCI 概览页「固件版本」一行读 /etc/openwrt_release 的 DISTRIB_DESCRIPTION，
+    # 在原描述后追加署名，让网页端也能看到编译信息
+    cp -a /etc/openwrt_release /etc/openwrt_release.orig 2>/dev/null || true
+    # shellcheck disable=SC1091
+    . /etc/openwrt_release 2>/dev/null || true
+    NEWDESC="${DISTRIB_DESCRIPTION:-OpenWrt} | custom by ${BUILDER} (base ${BASE_TAG})"
+    sed -i "s|^DISTRIB_DESCRIPTION=.*|DISTRIB_DESCRIPTION=\"${NEWDESC}\"|" /etc/openwrt_release
+    echo "署名完成: /etc/banner + /etc/buildinfo + /etc/openwrt_release"
   '
 
 echo "==> [3/4] 导出容器"
