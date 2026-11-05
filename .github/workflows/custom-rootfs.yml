@@ -5,13 +5,17 @@ name: mu300 custom rootfs (lhhc_02)
 #   system:       openwrt-luci（带 MU300 控制面板，推荐）或 openwrt（纯净）
 #
 # 产物：
-#   - mu300-<system>-rootfs.tar.gz   定制版 rootfs（已含 OpenClash + Tailscale(LuCI) + lhhc_02 署名）
+#   - mu300-<system>-rootfs.tar.gz   定制版 rootfs（已含 OpenClash + Tailscale(LuCI)）
 #   - out/*.zip                      对应的 Magisk 刷机包（只打 5.4 内核 + 所选系统）
 #
 # 说明：
 #   - AdGuard Home 已去掉，插件只剩 OpenClash 和 Tailscale，两个都带 LuCI 界面。
 #   - Tailscale 用 whzhni1/luci-app-tailscale（自带 config/init，tailscaled 由页面里下载），
 #     不装官方 tailscale 包。
+#   - 署名 lhhc_02 只写 /etc/banner 和 /etc/buildinfo，不改 /etc/openwrt_release
+#     和 /usr/lib/os-release——那两个文件由 procd 解析后喂给 LuCI 概览页，
+#     改里面的版本串会被解析错位，实测整行乱码，已整块放弃。
+#     设备上查看：cat /etc/buildinfo，或直接看 SSH 登录横幅。
 #   - Magisk 包只出 5.4 内核那一个：靠 MU300_ZIP_SYSTEMS / MU300_ZIP_KERNELS 过滤
 #     （需要 tools/make-magisk-zips.sh 带这两个变量；没有的话会把 11 个包全打出来，
 #      也能用，只是慢且产物大）。
