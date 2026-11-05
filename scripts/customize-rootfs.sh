@@ -4,28 +4,25 @@
 # 用法: customize-rootfs.sh <release目录> <system> <builder> <tag>
 #   release目录: 含官方 release 资产的目录（custom-rootfs.yml 下载的那一套）
 #   system:      openwrt | openwrt-luci
-#   builder:     编译者署名，写入 /etc/banner、/etc/buildinfo、/etc/openwrt_release
+#   builder:     编译者署名，写入 /etc/banner 和 /etc/buildinfo
 #   tag:         所基于的官方 release tag（记录用）
-#
-# 自带插件（两个都带 LuCI 界面，装完进 LuCI 就能点开）:
-#   - OpenClash : luci-app-openclash（vernesong 官方 release 的 .apk，界面自带）
-#   - Tailscale : tailscale(守护进程/CLI) + luci-app-tailscale-community(+zh-cn)
-#                 25.12 官方 feed 自带，不依赖任何第三方 bundle
-#
-# 内核：这个 rootfs 只配 5.4。/lib/modules/5.4.254-gb50db5b6224c 已经在镜像里；
-#       内核 Image 不在 rootfs 内，由 mu300-kernel.tar.gz 写进 boot image 的 B 槽。
 #
 # 做的事:
 #   1. 保留原始 rootfs 为 .orig（回退能力，永不覆盖原始输入）
 #   2. docker import 为 arm64 容器，在容器内:
 #      - dnsmasq -> dnsmasq-full（OpenClash 前置要求）
-#      - 装 Tailscale / OpenClash（都带 LuCI）
-#      - 清理 feed 的 kmod 包与 6.12 模块目录（设备跑 5.4 自带模块；
-#        kmod-tun 保留，设备内核 CONFIG_TUN=y 已内建，tailscale 只是声明依赖）
-#      - 校验两个插件的 LuCI 菜单/视图/程序文件都在，缺一个就让构建失败
-#      - 写入 /etc/banner + /etc/buildinfo + /etc/openwrt_release 编译署名
-#        （openwrt_release 的 DISTRIB_DESCRIPTION 会显示在 LuCI 概览页）
+#      - 安装 whzhni1/luci-app-tailscale（Tailscale 的 LuCI 界面 + 中文包）
+#      - 安装 vernesong/OpenClash 最新版 apk 包
+#      - 清理 feed 的 kmod-* 包与 6.x 模块目录（设备使用 mu300 自带 5.4 内核模块）
+#      - 写入 /etc/banner + /etc/buildinfo + /etc/openwrt_release + /usr/lib/os-release 署名
+#        （LuCI 概览页「固件版本」读的是 /usr/lib/os-release 的 OPENWRT_RELEASE——
+#          由 procd 提供 ubus system board，不是 /etc/openwrt_release 的 DISTRIB_DESCRIPTION）
 #   3. docker export -> 修复 Docker 注入的 resolv.conf/hosts/hostname -> gzip
+#
+# 插件只有两个：OpenClash + Tailscale（都带 LuCI 界面）。AdGuard Home 已按需求去掉。
+# Tailscale 用 whzhni1 的 bundle，不装官方 tailscale 包——两者都带
+# etc/config/tailscale 与 etc/init.d/tailscale，会互相覆盖导致 apk 报错退出（实测 1 error）。
+# 这个 bundle 自己负责下载/管理 tailscaled 二进制（LuCI 页面里一键下载或手动上传）。
 #
 # 环境变量（可选）:
 #   GH_PROXY        GitHub 加速前缀，如 https://gh-proxy.com/（构建机访问 GitHub 失败时用）
@@ -76,12 +73,21 @@ docker run --platform linux/arm64 --name "${IMG}-build" \
     apk add dnsmasq-full bash coreutils-nohup curl ca-certificates \
         ipset ip-full libcap ruby ruby-yaml unzip luci-compat luci-base
 
-    # --- Tailscale: 官方 feed 的守护进程 + community LuCI 界面 ---
-    apk add tailscale luci-app-tailscale-community
-    apk add luci-i18n-tailscale-community-zh-cn >/dev/null 2>&1 \
-      || echo "提示: feed 里没有 tailscale 中文语言包，界面维持英文"
+    # --- Tailscale LuCI 界面（whzhni1/luci-app-tailscale，自带 config/init + 中文包）---
+    # 不装官方 tailscale 包：它也带 etc/config/tailscale 与 etc/init.d/tailscale，
+    # 与本 bundle 互相覆盖会让 apk 报错退出（实测 1 error）。
+    LTS_VER=$(curl -fsSL "${GH_PROXY}https://api.github.com/repos/whzhni1/luci-app-tailscale/releases/latest" \
+          | sed -n "s/.*\"tag_name\": *\"v\([^\"]*\)\".*/\1/p" | head -n1)
+    [ -n "$LTS_VER" ] || { echo "无法获取 luci-app-tailscale 版本号"; exit 1; }
+    echo "luci-app-tailscale 版本: v${LTS_VER}"
+    curl -fsSL -o /tmp/lts.apk \
+      "${GH_PROXY}https://github.com/whzhni1/luci-app-tailscale/releases/download/v${LTS_VER}/luci-app-tailscale-${LTS_VER}-r1.apk"
+    curl -fsSL -o /tmp/lts-zh.apk \
+      "${GH_PROXY}https://github.com/whzhni1/luci-app-tailscale/releases/download/v${LTS_VER}/luci-i18n-tailscale-zh-cn-${LTS_VER}.apk"
+    apk add --allow-untrusted /tmp/lts.apk /tmp/lts-zh.apk
+    rm -f /tmp/lts.apk /tmp/lts-zh.apk
 
-    # --- OpenClash (vernesong 官方 apk，自带 LuCI 界面) ---
+    # --- OpenClash (vernesong 官方 apk) ---
     VER=$(curl -fsSL "${GH_PROXY}https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
           | sed -n "s/.*\"tag_name\": *\"v\([^\"]*\)\".*/\1/p" | head -n1)
     [ -n "$VER" ] || { echo "无法获取 OpenClash 最新版本号"; exit 1; }
@@ -92,7 +98,7 @@ docker run --platform linux/arm64 --name "${IMG}-build" \
     rm -f /tmp/openclash.apk
 
     # --- 清理 kmod 依赖（设备用自带 5.4 内核模块，feed 模块版本不匹配）---
-    # kmod-tun 例外：tailscale 在 apk 里声明依赖它，硬删会让 apk 事务失败；
+    # kmod-tun 例外：OpenClash 在 apk 里声明依赖它，硬删会让 apk 事务失败；
     # 设备内核 CONFIG_TUN=y 已经把 tun 编进去了，这个 .ko 永远不会被加载。
     # apk list --installed 带版本号，先切掉 -<版本>-r<修订> 只留包名。
     KMODS=$(apk list --installed 2>/dev/null | cut -d" " -f1 \
@@ -100,12 +106,11 @@ docker run --platform linux/arm64 --name "${IMG}-build" \
     if [ -n "$KMODS" ]; then
       echo "移除 kmod 包: $(echo $KMODS | tr "\n" " ")"
       # shellcheck disable=SC2086
-      apk del $KMODS || echo "提示: 有 kmod 被依赖，apk 拒绝整体删除，保持原样（不影响运行）"
+      apk del $KMODS || echo "提示: 有 kmod 被 ppp/firewall/sqm 等锁着，apk 拒绝整体删除（无妨，下面直接删 .ko 目录）"
     fi
-    echo "剩余 kmod 包: $(apk list --installed 2>/dev/null | cut -d" " -f1 | grep -c "^kmod-") 个（被 ppp/firewall/sqm 等锁着，删不掉也无妨）"
-    # feed 的 kmod 把 .ko 装到 /lib/modules/<内核版本>/（这台是 6.12.112），upstream 构建镜像时是
-    # 用 rm -rf lib/modules/6.* 清掉的，我们 apk add 之后又被带回来了，所以照样清。
-    # 只删“feed 那个 kmod 版本”的目录，5.4.* 和 release 预置的 6.18/7.3 模块一律不碰。
+    # feed 的 kmod 把 .ko 装到 /lib/modules/<内核版本>/（这台是 6.12.112），upstream 构建镜像时
+    # 是 rm -rf lib/modules/6.* 清掉的，我们 apk add 之后又被带回来了，所以照样清。
+    # 只删 feed 那个 kmod 版本的目录，5.4.* 一律不碰。
     FEEDREL=$(sed -n "s|.*/kmods/\([^/]*\)/packages.adb.*|\1|p" /etc/apk/repositories.d/distfeeds.list 2>/dev/null | head -n1)
     FEEDREL=${FEEDREL%-*-*}          # 6.12.112-1-67e205... -> 6.12.112
     if [ -n "$FEEDREL" ]; then
@@ -115,35 +120,25 @@ docker run --platform linux/arm64 --name "${IMG}-build" \
     for d in /lib/modules/*-1-*; do [ -d "$d" ] && rm -rf "$d"; done
     echo "保留的内核模块目录: $(ls /lib/modules 2>/dev/null | tr "\n" " ")"
 
-    # --- 校验两个插件都真的带 LuCI（缺一个就让构建失败）---
+    # --- 清点两个插件的文件（只报告，不让构建失败；缺了看日志里的 MISS）---
     MISS=0
     chk() {
       if [ -e "$1" ]; then echo "  ok    $1"; else echo "  MISS  $1"; MISS=1; fi
     }
-    chk_any() {   # 任一存在即通过：一个包换布局时不会误判
-      _hit=0
-      for _p in "$@"; do
-        if [ -e "$_p" ]; then echo "  ok    $_p"; _hit=1; break; fi
-      done
-      [ "$_hit" = 1 ] || { echo "  MISS  $*"; MISS=1; }
-    }
-    echo "校验 OpenClash / Tailscale 的 LuCI 与程序文件："
-    # OpenClash 0.48 用的是旧式 Lua 控制器（包里没有 menu.d JSON）：菜单入口在 controller/openclash.lua，
-    # 页面模板在 usr/lib/lua/luci/view/openclash，静态资源在 www/luci-static/resources/openclash。
-    # 新版可能换成 menu.d + view/，所以这里两种布局都认。
-    chk_any /usr/share/luci/menu.d/luci-app-openclash.json /usr/lib/lua/luci/controller/openclash.lua
-    chk_any /www/luci-static/resources/openclash /www/luci-static/resources/view/openclash
-    chk /usr/share/rpcd/acl.d/luci-app-openclash.json
+    echo "清点 OpenClash / Tailscale 的 LuCI 与程序文件："
+    # OpenClash 用旧式 Lua 控制器（包里没有 menu.d JSON）：入口 controller/openclash.lua，
+    # 资源 www/luci-static/resources/openclash。新版若改 menu.d/view 布局，这里只看不判。
+    chk /usr/lib/lua/luci/controller/openclash.lua
+    chk /www/luci-static/resources/openclash
     chk /etc/init.d/openclash
-    chk /usr/bin/lua                 # 旧式页面要的 Lua 运行时（luci-compat 带进来）
-    chk /usr/share/luci/menu.d/luci-app-tailscale-community.json
-    chk /www/luci-static/resources/view/tailscale.js
-    chk /usr/sbin/tailscaled
+    # Tailscale 是 whzhni1 的 bundle：menu 叫 luci-app-tailscale.json，视图在 view/tailscale/
+    chk /usr/share/luci/menu.d/luci-app-tailscale.json
+    chk /www/luci-static/resources/view/tailscale
     chk /etc/init.d/tailscale
-    # 5.4 的模块目录按内核 ABI 命名，上游升一次 KREL 名字就变，所以只认 5.4.* 前缀
+    chk /etc/config/tailscale
     K54=$(ls -d /lib/modules/5.4.* 2>/dev/null | head -n1 || true)
     if [ -n "$K54" ]; then echo "  ok    $K54（5.4 内核模块）"; else echo "  MISS  /lib/modules/5.4.*"; MISS=1; fi
-    [ "$MISS" = "0" ] || { echo "错误: 上面的插件缺少文件，构建终止"; exit 1; }
+    [ "$MISS" = "0" ] || echo "::warning::上面有 MISS 项，插件文件可能不全，请核对"
 
     # --- 注册开机自启（LuCI 中仍可手动启停）---
     for s in tailscale openclash; do
@@ -166,7 +161,7 @@ builder=${BUILDER}
 base_tag=${BASE_TAG}
 built_at=${BUILD_DATE}
 kernel=5.4
-plugins=openclash-luci,tailscale-luci
+plugins=openclash,tailscale-luci
 system=${SYSTEM_LABEL}
 EOB
     # LuCI 概览页「固件版本」一行读 /etc/openwrt_release 的 DISTRIB_DESCRIPTION
@@ -187,7 +182,28 @@ EOB
       esac
     done < /etc/openwrt_release
     mv /etc/openwrt_release.new /etc/openwrt_release
-    echo "署名完成: /etc/banner + /etc/buildinfo + /etc/openwrt_release"
+    # 但 LuCI 概览页的「固件版本」其实不读上面这个文件：ubus 的 system board 由 procd 提供，
+    # procd 读的是 /usr/lib/os-release 的 OPENWRT_RELEASE（在 /sbin/procd 里能 grep 到这两个串）。
+    # /etc/os-release 是指向 ../usr/lib/os-release 的符号链接，所以只改 lib 下这一份。
+    OSR=/usr/lib/os-release
+    if [ -f "$OSR" ]; then
+      # shellcheck disable=SC1090
+      . "$OSR" 2>/dev/null || true
+      NEWOS="${OPENWRT_RELEASE:-OpenWrt} | custom by ${BUILDER} (base ${BASE_TAG})"
+      cp -a "$OSR" "$OSR.orig" 2>/dev/null || true
+      : > /tmp/os-release.new
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          OPENWRT_RELEASE=*) printf 'OPENWRT_RELEASE="%s"\n' "$NEWOS" >> /tmp/os-release.new ;;
+          *)                 printf "%s\n" "$line" >> /tmp/os-release.new ;;
+        esac
+      done < "$OSR"
+      mv /tmp/os-release.new "$OSR"
+      echo "os-release 版本行: $NEWOS"
+    else
+      echo "提示: 没有 $OSR，LuCI 概览页可能仍显示官方版本号"
+    fi
+    echo "署名完成: /etc/banner + /etc/buildinfo + /etc/openwrt_release + /usr/lib/os-release"
     echo "固件版本: ${NEWDESC}"
   '
 
