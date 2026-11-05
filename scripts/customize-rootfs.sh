@@ -124,14 +124,26 @@ built_at=${BUILD_DATE}
 plugins=openclash,tailscale-luci,adguardhome
 system=${SYSTEM_LABEL}
 EOB
-    # LuCI 概览页「固件版本」一行读 /etc/openwrt_release 的 DISTRIB_DESCRIPTION，
-    # 在原描述后追加署名，让网页端也能看到编译信息
+    # LuCI 概览页「固件版本」一行读 /etc/openwrt_release 的 DISTRIB_DESCRIPTION
+    # （rpcd 的 system board 接口），在原描述后追加署名，让网页端也能看到编译信息。
+    # 注意：不要把这一步写成 sed s|...|...|，署名文本里含 "|" 会被当成分隔符，
+    # 实测报 "sed: bad option in substitution expression" 并中断构建。
+    # 这里改为逐行重写，完全避开 sed 的转义/分隔符问题。
     cp -a /etc/openwrt_release /etc/openwrt_release.orig 2>/dev/null || true
     # shellcheck disable=SC1091
     . /etc/openwrt_release 2>/dev/null || true
     NEWDESC="${DISTRIB_DESCRIPTION:-OpenWrt} | custom by ${BUILDER} (base ${BASE_TAG})"
-    sed -i "s|^DISTRIB_DESCRIPTION=.*|DISTRIB_DESCRIPTION=\"${NEWDESC}\"|" /etc/openwrt_release
+    DESC_LINE="DISTRIB_DESCRIPTION=\"${NEWDESC}\""
+    : > /etc/openwrt_release.new
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        DISTRIB_DESCRIPTION=*) printf "%s\n" "$DESC_LINE" >> /etc/openwrt_release.new ;;
+        *)                     printf "%s\n" "$line"      >> /etc/openwrt_release.new ;;
+      esac
+    done < /etc/openwrt_release
+    mv /etc/openwrt_release.new /etc/openwrt_release
     echo "署名完成: /etc/banner + /etc/buildinfo + /etc/openwrt_release"
+    echo "固件版本: ${NEWDESC}"
   '
 
 echo "==> [3/4] 导出容器"
