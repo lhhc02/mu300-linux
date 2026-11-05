@@ -1,0 +1,99 @@
+name: mu300 custom rootfs (lhhc_02)
+
+# 用法：Actions -> "mu300 custom rootfs (lhhc_02)" -> Run workflow
+#   upstream_tag: dikeckaan/mu300-linux 的官方 release tag（如 v2026.11.02.1）
+#   system:       openwrt-luci（带 MU300 控制面板，推荐）或 openwrt（纯净）
+#
+# 产物：
+#   - mu300-<system>-rootfs.tar.gz   定制版 rootfs（已含 OpenClash/Tailscale/AdGuard Home + lhhc_02 署名）
+#   - out/*.zip                      对应的 Magisk 刷机包（若 make-magisk-zips 成功）
+#
+# 注：
+#   1. ubuntu-24.04-arm 对公共仓库免费。若你的 Fork 是私有仓库，把 runs-on 改成
+#      ubuntu-latest，并在 checkout 步骤后加：
+#        - uses: docker/setup-qemu-action@v3
+#      （QEMU 模拟 arm64 会慢 3~5 倍）
+#   2. 若 make-magisk-zips.sh 对定制的 SHA256SUMS 校验过严而失败，
+#      rootfs tar.gz 仍可作为构建产物使用（警告不会导致 job 失败）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: '官方 release tag，如 v2026.11.02.1'
+        required: true
+        default: 'v2026.11.02.1'
+      system:
+        description: '目标系统'
+        required: true
+        default: 'openwrt-luci'
+        type: choice
+        options:
+          - openwrt-luci
+          - openwrt
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      TAG: ${{ inputs.upstream_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载官方 release 资产并校验
+        run: |
+          mkdir -p "release/$TAG"
+          gh release download "$TAG" -R dikeckaan/mu300-linux -D "release/$TAG" \
+            -p SHA256SUMS \
+            -p 'mu300-kernel*.tar.gz' \
+            -p 'mu300-*-rootfs.tar.gz' \
+            -p 'mu300-extra-*.tar.gz' \
+            -p 'mu300-*.manifest.gz' \
+            -p mu300-update -p mu300-release
+          (cd "release/$TAG" && sha256sum -c --ignore-missing SHA256SUMS)
+
+      - name: 定制 rootfs（插件 + 署名）
+        run: |
+          bash scripts/customize-rootfs.sh \
+            "release/$TAG" \
+            "${{ inputs.system }}" \
+            "lhhc_02" \
+            "$TAG"
+
+      - name: 更新 SHA256SUMS（rootfs 哈希已变化）
+        run: |
+          ROOTFS="mu300-${{ inputs.system }}-rootfs.tar.gz"
+          cd "release/$TAG"
+          rm -f SHA256SUMS.sig
+          NEWHASH=$(sha256sum "$ROOTFS" | cut -d' ' -f1)
+          # 按第二字段精确替换该文件那一行（兼容 "hash  name" 与 "hash *name" 两种格式）
+          awk -v f="$ROOTFS" -v h="$NEWHASH" \
+            '$2==f || $2=="*"f {print h"  "f; next} {print}' SHA256SUMS > SHA256SUMS.new
+          mv SHA256SUMS.new SHA256SUMS
+          sha256sum -c --ignore-missing SHA256SUMS
+
+      - name: 生成 Magisk 刷机包
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zip unzip cpio dash busybox lz4 >/dev/null
+          python3 -m pip install -q lz4 || python3 -m pip install -q --break-system-packages lz4
+          set -o pipefail
+          sh tools/make-magisk-zips.sh "release/$TAG" out "$TAG" 2>&1 | tee magisk-build.log \
+            || echo "::warning::make-magisk-zips 失败，完整日志见产物 magisk-build.log"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: mu300-custom-${{ inputs.system }}-${{ inputs.upstream_tag }}
+          path: |
+            release/${{ inputs.upstream_tag }}/mu300-${{ inputs.system }}-rootfs.tar.gz
+            release/${{ inputs.upstream_tag }}/mu300-${{ inputs.system }}-rootfs.tar.gz.orig
+            out/*.zip
+            out/SHA256SUMS-magisk
+            magisk-build.log
+          if-no-files-found: warn
