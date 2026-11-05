@@ -67,7 +67,10 @@ docker run --platform linux/arm64 --name "${IMG}-build" \
         ipset ip-full libcap ruby ruby-yaml unzip luci-compat luci-base
 
     # --- 官方 feed 插件 ---
-    apk add tailscale adguardhome
+    # 注意：不再装官方 tailscale 包——luci-app-tailscale 自带 etc/config/tailscale
+    # 与 etc/init.d/tailscale，两者会互相覆盖导致 apk 报错退出（实测 1 error）。
+    # 它自己负责下载/管理 tailscaled 二进制（LuCI 内核页可一键下载或手动上传）。
+    apk add adguardhome
 
     # --- Tailscale LuCI 界面（官方源无 luci 界面，用 whzhni1/luci-app-tailscale）---
     LTS_VER=$(curl -fsSL "${GH_PROXY}https://api.github.com/repos/whzhni1/luci-app-tailscale/releases/latest" \
@@ -118,7 +121,7 @@ EOB
 builder=${BUILDER}
 base_tag=${BASE_TAG}
 built_at=${BUILD_DATE}
-plugins=openclash,tailscale,tailscale-luci,adguardhome
+plugins=openclash,tailscale-luci,adguardhome
 system=${SYSTEM_LABEL}
 EOB
     # LuCI 概览页「固件版本」一行读 /etc/openwrt_release 的 DISTRIB_DESCRIPTION，
