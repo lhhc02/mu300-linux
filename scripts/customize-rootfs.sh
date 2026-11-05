@@ -102,11 +102,17 @@ docker run --platform linux/arm64 --name "${IMG}-build" \
       # shellcheck disable=SC2086
       apk del $KMODS || echo "提示: 有 kmod 被依赖，apk 拒绝整体删除，保持原样（不影响运行）"
     fi
-    echo "剩余 kmod: $(apk list --installed 2>/dev/null | cut -d" " -f1 | grep "^kmod-" | tr "\n" " ")"
-    # 刚装的 apk 会把 feed 的 6.12 模块目录带回来（kmod-tun 等），设备只跑 5.4，
-    # 这些 feed 模块一律没用。只删 feed 的目录（名字形如 6.12.112-1-67e205...），
-    # 5.4.254-gb50db5b6224c 必须留着，那是设备真正要用的模块。
-    for d in /lib/modules/6.*-1-*; do [ -d "$d" ] && rm -rf "$d"; done
+    echo "剩余 kmod 包: $(apk list --installed 2>/dev/null | cut -d" " -f1 | grep -c "^kmod-") 个（被 ppp/firewall/sqm 等锁着，删不掉也无妨）"
+    # feed 的 kmod 把 .ko 装到 /lib/modules/<内核版本>/（这台是 6.12.112），upstream 构建镜像时是
+    # 用 rm -rf lib/modules/6.* 清掉的，我们 apk add 之后又被带回来了，所以照样清。
+    # 只删“feed 那个 kmod 版本”的目录，5.4.* 和 release 预置的 6.18/7.3 模块一律不碰。
+    FEEDREL=$(sed -n "s|.*/kmods/\([^/]*\)/packages.adb.*|\1|p" /etc/apk/repositories.d/distfeeds.list 2>/dev/null | head -n1)
+    FEEDREL=${FEEDREL%-*-*}          # 6.12.112-1-67e205... -> 6.12.112
+    if [ -n "$FEEDREL" ]; then
+      echo "清理 feed 模块目录: /lib/modules/$FEEDREL"
+      rm -rf "/lib/modules/$FEEDREL"
+    fi
+    for d in /lib/modules/*-1-*; do [ -d "$d" ] && rm -rf "$d"; done
     echo "保留的内核模块目录: $(ls /lib/modules 2>/dev/null | tr "\n" " ")"
 
     # --- 校验两个插件都真的带 LuCI（缺一个就让构建失败）---
@@ -114,10 +120,22 @@ docker run --platform linux/arm64 --name "${IMG}-build" \
     chk() {
       if [ -e "$1" ]; then echo "  ok    $1"; else echo "  MISS  $1"; MISS=1; fi
     }
+    chk_any() {   # 任一存在即通过：一个包换布局时不会误判
+      _hit=0
+      for _p in "$@"; do
+        if [ -e "$_p" ]; then echo "  ok    $_p"; _hit=1; break; fi
+      done
+      [ "$_hit" = 1 ] || { echo "  MISS  $*"; MISS=1; }
+    }
     echo "校验 OpenClash / Tailscale 的 LuCI 与程序文件："
-    chk /usr/share/luci/menu.d/luci-app-openclash.json
-    chk /www/luci-static/resources/view/openclash
+    # OpenClash 0.48 用的是旧式 Lua 控制器（包里没有 menu.d JSON）：菜单入口在 controller/openclash.lua，
+    # 页面模板在 usr/lib/lua/luci/view/openclash，静态资源在 www/luci-static/resources/openclash。
+    # 新版可能换成 menu.d + view/，所以这里两种布局都认。
+    chk_any /usr/share/luci/menu.d/luci-app-openclash.json /usr/lib/lua/luci/controller/openclash.lua
+    chk_any /www/luci-static/resources/openclash /www/luci-static/resources/view/openclash
+    chk /usr/share/rpcd/acl.d/luci-app-openclash.json
     chk /etc/init.d/openclash
+    chk /usr/bin/lua                 # 旧式页面要的 Lua 运行时（luci-compat 带进来）
     chk /usr/share/luci/menu.d/luci-app-tailscale-community.json
     chk /www/luci-static/resources/view/tailscale.js
     chk /usr/sbin/tailscaled
