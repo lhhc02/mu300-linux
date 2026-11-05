@@ -4,20 +4,19 @@ name: mu300 custom rootfs (lhhc_02)
 #   upstream_tag: dikeckaan/mu300-linux 的官方 release tag（如 v2026.11.02.1）
 #   system:       openwrt-luci（带 MU300 控制面板，推荐）或 openwrt（纯净）
 #
-# 这个流程固定只做 5.4 内核，产物只有这一个内核 + 所选系统：
-#   - mu300-<system>-rootfs.tar.gz            定制版 rootfs（含 OpenClash + Tailscale，都带 LuCI）
-#   - mu300-magisk-<tag>-<system>-k5.4.zip    Magisk 刷机包（内含上面这个 rootfs + 5.4 内核）
-#   - rootfs 的 .orig 备份、out/SHA256SUMS-magisk、magisk-build.log
+# 产物：
+#   - mu300-<system>-rootfs.tar.gz   定制版 rootfs（已含 OpenClash + Tailscale(LuCI) + lhhc_02 署名）
+#   - out/*.zip                      对应的 Magisk 刷机包（只打 5.4 内核 + 所选系统）
 #
-# 插件来源（都自带 LuCI 界面，装完在 LuCI 里就能点开）：
-#   - OpenClash : vernesong 官方 release 的 luci-app-openclash-<ver>.apk（随流程取最新版）
-#   - Tailscale : 25.12 官方 feed 的 tailscale + luci-app-tailscale-community（+ 中文语言包）
-#
-# 注：
-#   1. ubuntu-24.04-arm 对公共仓库免费。若你的 Fork 是私有仓库，把 runs-on 改成
-#      ubuntu-latest，QEMU 模拟 arm64 会慢 3~5 倍。
-#   2. 若 make-magisk-zips.sh 因 SHA256SUMS 校验失败而没出 zip，rootfs tar.gz 仍可用
-#      （日志见产物 magisk-build.log）。
+# 说明：
+#   - AdGuard Home 已去掉，插件只剩 OpenClash 和 Tailscale，两个都带 LuCI 界面。
+#   - Tailscale 用 whzhni1/luci-app-tailscale（自带 config/init，tailscaled 由页面里下载），
+#     不装官方 tailscale 包。
+#   - Magisk 包只出 5.4 内核那一个：靠 MU300_ZIP_SYSTEMS / MU300_ZIP_KERNELS 过滤
+#     （需要 tools/make-magisk-zips.sh 带这两个变量；没有的话会把 11 个包全打出来，
+#      也能用，只是慢且产物大）。
+#   - 若 make-magisk-zips.sh 对定制的 SHA256SUMS 校验过严而失败，
+#     rootfs tar.gz 仍可作为构建产物使用（警告不会导致 job 失败）。
 
 on:
   workflow_dispatch:
@@ -40,7 +39,6 @@ permissions:
 
 jobs:
   build:
-    name: 定制 rootfs + Magisk 包 (5.4)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     env:
@@ -52,8 +50,6 @@ jobs:
       - name: 下载官方 release 资产并校验
         run: |
           mkdir -p "release/$TAG"
-          # 6.18/7.3 内核和其他系统的 rootfs 也一起下：make-magisk-zips.sh 出厂要求整套资产
-          # 齐全，只有真去打 zip 那一步才按 MU300_ZIP_* 过滤（整套约 540 MB，不值得为此改它）
           gh release download "$TAG" -R dikeckaan/mu300-linux -D "release/$TAG" \
             -p SHA256SUMS \
             -p 'mu300-kernel*.tar.gz' \
@@ -63,7 +59,7 @@ jobs:
             -p mu300-update -p mu300-release
           (cd "release/$TAG" && sha256sum -c --ignore-missing SHA256SUMS)
 
-      - name: 定制 rootfs（OpenClash + Tailscale + 署名 lhhc_02）
+      - name: 定制 rootfs（OpenClash + Tailscale + 署名）
         env:
           GH_PROXY: ${{ vars.GH_PROXY }}
         run: |
@@ -99,7 +95,7 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: mu300-custom-${{ inputs.system }}-k5.4-${{ inputs.upstream_tag }}
+          name: mu300-custom-${{ inputs.system }}-${{ inputs.upstream_tag }}
           path: |
             release/${{ inputs.upstream_tag }}/mu300-${{ inputs.system }}-rootfs.tar.gz
             release/${{ inputs.upstream_tag }}/mu300-${{ inputs.system }}-rootfs.tar.gz.orig
