@@ -3,21 +3,21 @@ name: mu300 custom rootfs (lhhc_02)
 # 用法：Actions -> "mu300 custom rootfs (lhhc_02)" -> Run workflow
 #   upstream_tag: dikeckaan/mu300-linux 的官方 release tag（如 v2026.11.02.1）
 #   system:       openwrt-luci（带 MU300 控制面板，推荐）或 openwrt（纯净）
-#   lucky_ref:    gdy666/luci-app-lucky 的分支/tag，Lucky 核心与 LuCI 界面从这里编
-#   sdk_arch:     OpenWrt SDK 架构，必须与 rootfs 一致（armsr/armv8 = aarch64_cortex-a53）
 #
-# 产物（镜像里三个插件都自带 LuCI 界面）：
-#   - Lucky      : lucky + luci-app-lucky + 中文包      （下面的 lucky 任务用 SDK 编成 apk）
-#   - Tailscale  : tailscale + luci-app-tailscale-community（25.12 官方 feed）
-#   - OpenClash  : luci-app-openclash                    （vernesong 官方 apk）
-#   - mu300-<system>-rootfs.tar.gz   定制版 rootfs（已含上面三个插件 + lhhc_02 署名）
-#   - out/*.zip                      对应的 Magisk 刷机包（若 make-magisk-zips 成功）
+# 这个流程固定只做 5.4 内核，产物只有这一个内核 + 所选系统：
+#   - mu300-<system>-rootfs.tar.gz            定制版 rootfs（含 OpenClash + Tailscale，都带 LuCI）
+#   - mu300-magisk-<tag>-<system>-k5.4.zip    Magisk 刷机包（内含上面这个 rootfs + 5.4 内核）
+#   - rootfs 的 .orig 备份、out/SHA256SUMS-magisk、magisk-build.log
+#
+# 插件来源（都自带 LuCI 界面，装完在 LuCI 里就能点开）：
+#   - OpenClash : vernesong 官方 release 的 luci-app-openclash-<ver>.apk（随流程取最新版）
+#   - Tailscale : 25.12 官方 feed 的 tailscale + luci-app-tailscale-community（+ 中文语言包）
 #
 # 注：
 #   1. ubuntu-24.04-arm 对公共仓库免费。若你的 Fork 是私有仓库，把 runs-on 改成
-#      ubuntu-latest（两个 job 都要改），QEMU 模拟 arm64 会慢 3~5 倍。
-#   2. 若 make-magisk-zips.sh 对定制的 SHA256SUMS 校验过严而失败，
-#      rootfs tar.gz 仍可作为构建产物使用（警告不会导致 job 失败）。
+#      ubuntu-latest，QEMU 模拟 arm64 会慢 3~5 倍。
+#   2. 若 make-magisk-zips.sh 因 SHA256SUMS 校验失败而没出 zip，rootfs tar.gz 仍可用
+#      （日志见产物 magisk-build.log）。
 
 on:
   workflow_dispatch:
@@ -34,67 +34,13 @@ on:
         options:
           - openwrt-luci
           - openwrt
-      lucky_ref:
-        description: 'gdy666/luci-app-lucky 的分支/tag（编译 Lucky 用）'
-        required: true
-        default: 'v3.3.3'
-      sdk_arch:
-        description: 'OpenWrt SDK 架构（需与 rootfs 一致；不行就换 aarch64_cortex-a53-25.12.5）'
-        required: true
-        default: 'aarch64_cortex-a53-25.12.6'
 
 permissions:
   contents: read
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Lucky 官方只发 ipk 和裸二进制，而 25.12 的包管理器是 apk。
-  # 这里用 openwrt/gh-action-sdk 把 lucky + luci-app-lucky 编成 .apk，
-  # 下一个 job 直接 apk add 进镜像（版本、依赖、菜单都由包自己保证）。
-  # ---------------------------------------------------------------------------
-  lucky:
-    name: 编译 Lucky apk (SDK)
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: gdy666/luci-app-lucky
-          ref: ${{ inputs.lucky_ref }}
-          fetch-depth: 0
-
-      - name: 用 OpenWrt SDK 编译 lucky / luci-app-lucky（带中文包）
-        id: sdk_full
-        continue-on-error: true
-        uses: openwrt/gh-action-sdk@f5813d30eeef3534b58ac7e79c5d8842b6035434 # main, pinned 2026-08-09
-        env:
-          ARCH: ${{ inputs.sdk_arch }}
-          BUILD_LOG: 1
-          PACKAGES: lucky luci-app-lucky luci-i18n-lucky-zh-cn
-
-      # 个别 SDK 版本里 luci-i18n-lucky-zh-cn 这个翻译目标名对不上时，退回只编两个主包：
-      # 镜像照样有 Lucky + LuCI 界面，只是界面语言落回英文。
-      - name: 中文包编不出来就只编主包
-        if: steps.sdk_full.outcome == 'failure'
-        uses: openwrt/gh-action-sdk@f5813d30eeef3534b58ac7e79c5d8842b6035434 # main, pinned 2026-08-09
-        env:
-          ARCH: ${{ inputs.sdk_arch }}
-          BUILD_LOG: 1
-          PACKAGES: lucky luci-app-lucky
-
-      - name: 列一下编出来的包
-        run: find bin/packages -name '*.apk' -printf '%f\n' | sort
-
-      - name: 上传 Lucky apk
-        uses: actions/upload-artifact@v4
-        with:
-          name: lucky-apk
-          path: bin/packages/**/*.apk
-          if-no-files-found: error
-
   build:
-    name: 定制 rootfs
-    needs: lucky
+    name: 定制 rootfs + Magisk 包 (5.4)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     env:
@@ -103,20 +49,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 取回 Lucky apk
-        uses: actions/download-artifact@v4
-        with:
-          name: lucky-apk
-          path: lucky-artifact
-
-      - name: 摊平到 extra-apks（脚本只认一层目录）
-        run: |
-          mkdir -p extra-apks
-          find lucky-artifact -name '*.apk' -exec cp -v -t extra-apks {} +
-
       - name: 下载官方 release 资产并校验
         run: |
           mkdir -p "release/$TAG"
+          # 6.18/7.3 内核和其他系统的 rootfs 也一起下：make-magisk-zips.sh 出厂要求整套资产
+          # 齐全，只有真去打 zip 那一步才按 MU300_ZIP_* 过滤（整套约 540 MB，不值得为此改它）
           gh release download "$TAG" -R dikeckaan/mu300-linux -D "release/$TAG" \
             -p SHA256SUMS \
             -p 'mu300-kernel*.tar.gz' \
@@ -126,9 +63,8 @@ jobs:
             -p mu300-update -p mu300-release
           (cd "release/$TAG" && sha256sum -c --ignore-missing SHA256SUMS)
 
-      - name: 定制 rootfs（Lucky + Tailscale + OpenClash + 署名 lhhc_02）
+      - name: 定制 rootfs（OpenClash + Tailscale + 署名 lhhc_02）
         env:
-          EXTRA_APK_DIR: ${{ github.workspace }}/extra-apks
           GH_PROXY: ${{ vars.GH_PROXY }}
         run: |
           bash scripts/customize-rootfs.sh \
@@ -149,19 +85,21 @@ jobs:
           mv SHA256SUMS.new SHA256SUMS
           sha256sum -c --ignore-missing SHA256SUMS
 
-      - name: 生成 Magisk 刷机包
+      - name: 生成 Magisk 刷机包（只打 5.4 + 所选系统）
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq zip unzip cpio dash busybox lz4 >/dev/null
           python3 -m pip install -q lz4 || python3 -m pip install -q --break-system-packages lz4
           set -o pipefail
-          sh tools/make-magisk-zips.sh "release/$TAG" out "$TAG" 2>&1 | tee magisk-build.log \
+          MU300_ZIP_SYSTEMS="${{ inputs.system }}" MU300_ZIP_KERNELS="5.4" \
+            sh tools/make-magisk-zips.sh "release/$TAG" out "$TAG" 2>&1 | tee magisk-build.log \
             || echo "::warning::make-magisk-zips 失败，完整日志见产物 magisk-build.log"
+          ls -la out || true
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: mu300-custom-${{ inputs.system }}-${{ inputs.upstream_tag }}
+          name: mu300-custom-${{ inputs.system }}-k5.4-${{ inputs.upstream_tag }}
           path: |
             release/${{ inputs.upstream_tag }}/mu300-${{ inputs.system }}-rootfs.tar.gz
             release/${{ inputs.upstream_tag }}/mu300-${{ inputs.system }}-rootfs.tar.gz.orig
